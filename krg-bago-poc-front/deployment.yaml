@@ -1,0 +1,21 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment
+  labels:
+    app: react-app-bago
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: react-app-bago
+  template:
+    metadata:
+      labels:
+        app: react-app-bago
+    spec:
+      containers:
+        - name: react-app
+          image: juanse793/frontbagoimage:latest
+          ports:
+            - containerPort: 5172

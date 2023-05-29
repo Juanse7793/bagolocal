@@ -1,0 +1,139 @@
+pipeline {
+  environment{
+    USER_CREDENTIAL = credentials('dockerhub-bago-js')
+    DOCKER_REPOSITORY = 'https://registry.hub.docker.com'
+    HELM_REPOSITORY = 'helm-internal'
+    PROJECT_NAME = 'frontbagoimage'
+    DEPLOY_CONTEXT = '/msBagoFrontend/'
+    PROJECT_VERSION = 'latest'
+    docker = tool 'docker2'
+    dockerimagename = 'juanse793/frontbagoimage:latest'
+  }
+
+  agent {
+    kubernetes {
+      yaml '''
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          labels:
+            app: test
+        spec:
+          hostAliases:
+          - ip: "192.168.5.67"
+            hostnames:
+              - "nexusdev.krugercorp.com"
+          - ip: "192.168.5.27"
+            hostnames:
+              - "sonarqubekrugercorp.com"
+          - ip: "192.168.5.68"
+            hostnames:
+              - "jenkinsdev.krugercorp.com"
+          containers:
+          - name: node
+            env:
+              - name: 'HOME'
+                value: '.'
+            image: node:16.17.0-alpine3.16
+            command:
+            - cat
+            tty: true
+          - name: docker
+            image: docker:24.0.0-cli-alpine3.18
+            command:
+            - cat
+            tty: true
+            volumeMounts:
+            - mountPath: /var/run/docker.sock
+              name: docker-sock
+          - name: helm
+            image: alpine/helm:3.10.0
+            command:
+            - cat
+            tty: true
+          volumes:
+          - name: docker-sock
+            hostPath:
+              path: /var/run/docker.sock
+      '''
+    }
+  }
+ 
+  tools {nodejs 'npm'} 
+
+  stages {
+    stage('SonarQube Analysis') {
+      steps {
+        script {
+          def scannerHome = tool 'SonarScanner';
+          withSonarQubeEnv('sonar-server') {
+            sh "${scannerHome}/bin/sonar-scanner -X -Dsonar.projectKey=bago-poc-frontend-jenk"
+          }
+        }
+      }
+    }
+    stage('Unit Tests') {
+      steps {
+        script {
+          sh 'npm ci'
+          def testResult = sh(returnStatus: true, script: 'npm run test')
+          if (testResult != 0) {
+            error('Las pruebas unitarias fallaron. Se detendrá el pipeline.')
+          }     
+        }
+      }
+    }
+    stage('Build and publish docker image') {
+      when { expression { true } }
+      steps {
+        container('docker') {
+            withCredentials([usernamePassword(credentialsId: 'dockerhub-bago-js', passwordVariable: 'DOCKER_HUB_PASSWORD', usernameVariable: 'DOCKER_HUB_USERNAME')]) {
+          sh 'chmod 0777 /var/run/docker.sock' 
+          sh 'docker logout'
+          sh 'cd $HOME'
+          sh 'docker build . -t docker.io/juanse793/frontbagoimage:latest --load'
+            }
+        }
+      }
+    }
+    stage('Push image') {
+      steps {
+        container('docker') {
+          withCredentials([usernamePassword(credentialsId: 'dockerhub-bago-js', passwordVariable: 'DOCKER_HUB_PASSWORD', usernameVariable: 'DOCKER_HUB_USERNAME')]) {
+            sh "docker login -u $DOCKER_HUB_USERNAME -p $DOCKER_HUB_PASSWORD"
+            sh "docker push $dockerimagename"
+            sh "docker rmi $dockerimagename"
+          }
+        }
+      }   
+    }
+    stage('Deploy') {
+      when { expression { true } }
+      steps {
+        container('helm') {
+          sh 'ls -la'
+          withKubeConfig([
+         credentialsId: 'k8s',
+         caCertificate: '',
+         serverUrl: 'https://192.168.5.65/k8s/clusters/c-m-htcg95cq',
+         contextName: 'kccltdev',
+         clusterName: 'kccltdev',
+         namespace: 'bagodev']) {
+          script {
+            try {
+              sh 'curl -LO https://dl.k8s.io/release/v1.25.1/bin/linux/amd64/kubectl \
+                && mv kubectl /bin/kubectl \
+                && chmod a+x /bin/kubectl  && chmod 0777 /bin/kubectl'
+              sh 'kubectl apply -f deployment.yaml -n bagodev'
+              sh 'kubectl apply -f service.yaml -n bagodev'
+              sh 'kubectl get service react-app-bago -n bagodev'
+            } catch (Exception e) {
+                echo 'Exception to uninstall: ' +  e.toString()
+              }
+          }
+         }
+       }
+      }
+    }
+  }
+}
